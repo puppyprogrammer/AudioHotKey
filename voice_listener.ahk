@@ -1,275 +1,208 @@
-#Warn VarUnset, Off
+#Warn  VarUnset, Off
 #Requires AutoHotkey v2.0
 #SingleInstance Force
 
-;── Enable per‑monitor DPI awareness ──  
 DllCall("SetThreadDpiAwarenessContext", "Ptr", -3)
+CoordMode "Mouse", "Screen"          ; always use screen coords
 
-;── Global config ──  
-global listenerPath     := A_ScriptDir "\VoskListener.py"
-global commandFile      := A_ScriptDir "\voice_command.txt"
-global lastCommand      := ""
-global lastAction       := ""
-global lastHeardTime    := A_TickCount
-global fileStream       ; for streaming new words
-global initedStream     := false
-global winW             := 200
-global winH             := 50
-global lastValidMonitor := 1   ; Track last valid monitor
-global logGui, logOutput      ; GUI and its Edit control
-global pythonPid        := 0   ; Store Python process ID
+;── Globals ──
+global listenerExe    := A_ScriptDir '\VoskListener.exe'
+global listenerPy     := A_ScriptDir '\VoskListener.py'
+global commandFile    := A_ScriptDir '\voice_command.txt'
+global configFile     := A_ScriptDir '\commands.txt'
+global customCommands := []
+global lastCommand    := ''
+global lastAction     := ''
+global lastHeardTime  := A_TickCount
+global fileStream, initedStream := false
+global winW := 200, winH := 60
+global logGui, logOutput := ''
+global heardLine                       ; NEW: single‑line debug display
+global pyPid := 0
+global freezeUntil := 0                ; overlay “freeze” timer (ms)
 
-;── Create Matrix‑style UI under the cursor ──
-MouseGetPos(&startX, &startY)
-monitorCount := MonitorGetCount()
-targetM := MonitorGetPrimary()
+FreezeOverlay(ms := 300) {
+    global freezeUntil
+    freezeUntil := A_TickCount + ms
+}
+
+;── Load commands.txt ──
+if !FileExist(configFile) {
+    MsgBox 'commands.txt not found:`n' configFile
+    ExitApp
+}
+for line in StrSplit(FileRead(configFile), '`n', '`r') {
+    line := Trim(line)
+    if (line = '' || SubStr(line,1,1) = '#')
+        continue
+    parts := StrSplit(line, '|')
+    if parts.Length < 2
+        continue
+    customCommands.Push({
+        trigger: StrLower(Trim(parts[1])),
+        type:    Trim(parts[2]),
+        data:    parts.Length >= 3 ? Trim(parts[3]) : ''
+    })
+}
+
+;── Launch listener ──
+if FileExist(listenerExe) {
+    Run listenerExe, , "Hide", &pyPid
+} else if FileExist(listenerPy) {
+    Run Format('"python.exe" "%s"', listenerPy), , "Hide", &pyPid
+} else {
+    MsgBox '❌ Neither VoskListener.exe nor VoskListener.py found.'
+    ExitApp
+}
+
+if !ProcessWait(pyPid, 5)
+    LogMessage('⚠ Listener failed to start in 5000 ms')
+else
+    LogMessage('✔ Listener started (PID ' pyPid ')')
+
+;── Build overlay UI ──
+MouseGetPos &startX, &startY
+monitorCount := MonitorGetCount(), monitor := MonitorGetPrimary()
 Loop monitorCount {
-    MonitorGet(A_Index, &L, &T, &R, &B)
-    if (startX >= L && startX < R && startY >= T && startY < B) {
-        targetM := A_Index
-        lastValidMonitor := targetM
+    MonitorGet(A_Index,&L,&T,&R,&B)
+    if (startX>=L && startX<R && startY>=T && startY<B) {
+        monitor := A_Index
         break
     }
 }
-MonitorGet(targetM, &L, &T, &R, &B)
-startX := Max(L, Min(startX + 20, R - winW))
-startY := Max(T, Min(startY + 20, B - winH))
+MonitorGet(monitor,&L,&T,&R,&B)
+startX := Max(L, Min(startX+20, R-winW))
+startY := Max(T, Min(startY+20, B-winH))
 
-logGui := Gui("+AlwaysOnTop -Caption +ToolWindow +E0x80000")
-logGui.BackColor := "Black"
-logGui.SetFont("s6 cLime", "Consolas")  ; smaller text
+logGui := Gui('+AlwaysOnTop -Caption +ToolWindow +E0x80000')
+logGui.BackColor := 'Black'
+logGui.SetFont('s6 cLime', 'Consolas')
 
-; Edit control: ReadOnly, black background, lime text, no border, no client edge
-logOutput := logGui.Add(
-    "Edit"
-    , "ReadOnly w" . winW . " h" . winH
-      . " -VScroll -Border -E0x200 BackgroundBlack cLime"
-    , ""
-)
+heardLine := logGui.AddText(                                ; NEW
+    'x4 y2 w' winW-8 ' h10 BackgroundBlack cYellow'
+  , 'Heard:')
 
-logGui.Show Format("x{} y{} w{} h{} NoActivate", startX, startY, winW, winH)
+logOutput := logGui.AddEdit(
+      'ReadOnly '
+    . 'x0 y12 w' winW ' h' winH-12 ' '                   ; shifted down
+    . '-VScroll -Border -E0x200 '
+    . 'BackgroundBlack cLime', '')
+
+logGui.Show('x' startX ' y' startY ' w' winW ' h' winH ' NoActivate')
 WinSetTransparent(180, logGui.Hwnd)
+LogMessage('Initial monitor ' monitor ' @(' startX ',' startY ')')
 
+;── Timers & cleanup ──
+SetTimer CheckForVoiceCommand, 50
+SetTimer UpdateGuiPosition,    50
+SetTimer FadeOutLogGui,       1000
 
-;── Initial log entry ──
-LogMessage("Initial monitor " targetM " selected at (" startX "," startY ")")
-
-;── Functions ──
-KillExistingPythonProcesses() {
-    terminated := 0
-    for proc in ComObjGet("winmgmts:").ExecQuery("Select * from Win32_Process Where Name='python.exe'") {
-        if InStr(proc.CommandLine, "VoskListener.py") {
-            ProcessClose(proc.ProcessId)
-            terminated++
-            Sleep 200
-        }
-    }
-    if (terminated)
-        Sleep 500
-    return terminated
+cleanup(*) {
+    if (pyPid)
+        ProcessClose(pyPid)
+    return 0
 }
-
-KillPythonOnExit() {
-    global pythonPid
-    if (pythonPid)
-        ProcessClose(pythonPid)
-}
-
-CheckPythonInstances() {
-    count := 0
-    for proc in ComObjGet("winmgmts:").ExecQuery("Select * from Win32_Process Where Name='python.exe'") {
-        if InStr(proc.CommandLine, "VoskListener.py")
-            count++
-    }
-    if (count > 1) {
-        LogMessage("⚠ " count " VoskListener.py instances found, killing excess")
-        KillExistingPythonProcesses()
-        Run Format('python.exe "{}"', listenerPath), , "Hide", &pythonPid
-    }
-}
-
-;── Launch the listener if it exists ──
-if FileExist(listenerPath) {
-    term := KillExistingPythonProcesses()
-    if (term > 1)
-        LogMessage("⚠ Terminated " term " stale listener(s)")
-
-    Run Format('python.exe "{}"', listenerPath), , "Hide", &pythonPid
-
-    ; wait up to 5 s for the Python process to start
-    timeout := 5000
-    elapsed := 0
-    while (elapsed < timeout) {
-        if ProcessExist(pythonPid)
-            break
-        Sleep 100
-        elapsed += 100
-    }
-    if !ProcessExist(pythonPid)
-        LogMessage("⚠ Listener failed to start in " timeout "ms")
-
-    ; wait up to 5 s for the commandFile to be created
-    elapsed := 0
-    while (elapsed < timeout) {
-        if FileExist(commandFile)
-            break
-        Sleep 100
-        elapsed += 100
-    }
-    if !FileExist(commandFile)
-        LogMessage("⚠ commandFile not created in " timeout "ms")
-
-    ; clear any leftover command so “exit” isn’t re‑triggered on startup
-    if FileExist(commandFile) {
-        FileDelete(commandFile)
-        FileAppend "", commandFile
-    }
-    lastCommand := ""
-
-    Sleep 1000
-    LogMessage("✔ Python listener up (PID " pythonPid ")")
-}
-
-
-;── Start timers and cleanup ──
-SetTimer(CheckForVoiceCommand, 50)
-SetTimer(UpdateGuiPosition,   100)
-SetTimer(FadeOutLogGui,       1000)
-SetTimer(CheckPythonInstances,60000)
-OnExit((*) => KillPythonOnExit())
+OnExit cleanup
 return
 
 ;────────────────────────────────────────────────────
-; Keep the GUI following the mouse and on top
-;────────────────────────────────────────────────────
-UpdateGuiPosition() {
-    global logGui, winW, winH, lastValidMonitor
-
-    MouseGetPos(&mx, &my)
-    monitorCount := MonitorGetCount()
-    target := lastValidMonitor
-    Loop monitorCount {
-        MonitorGet(A_Index, &L, &T, &R, &B)
-        if (mx>=L && mx<R && my>=T && my<B) {
-            target := A_Index
-            lastValidMonitor := target
-            break
-        }
-    }
-    MonitorGet(target, &L, &T, &R, &B)
-
-    newX := Max(L, Min(mx+20, R-winW))
-    newY := Max(T, Min(my+20, B-winH))
-
-    DllCall("SetWindowPos"
-        , "Ptr", logGui.Hwnd
-        , "Ptr", -1
-        , "Int", newX
-        , "Int", newY
-        , "Int", 0
-        , "Int", 0
-        , "UInt", 0x1|0x10
-    )
-    WinSetTransparent(180, logGui.Hwnd)
-}
-
-;────────────────────────────────────────────────────
-; Stream new words and fire commands
-;────────────────────────────────────────────────────
 CheckForVoiceCommand() {
-    global commandFile, lastCommand, lastAction, lastHeardTime
-    global fileStream, initedStream, logOutput
+    global fileStream, initedStream, commandFile, lastCommand, lastHeardTime, heardLine
 
-    if !initedStream {
-        if FileExist(commandFile) {
-            fileStream := FileOpen(commandFile, "r")
-            fileStream.Seek(0, 2)
-        }
+    if !initedStream && FileExist(commandFile) {
+        fileStream := FileOpen(commandFile, 'r')
+        fileStream.Seek(0, 2)      ; jump to EOF
         initedStream := true
     }
+
     if initedStream {
-        newData := fileStream.Read()
-        if (newData) {
-            for word in StrSplit(Trim(newData), " ")
-                if (word) {
-                    LogMessage("🗣 " word)
-                    lastHeardTime := A_TickCount
-                }
-        }
+        for word in StrSplit(Trim(fileStream.Read()), ' ')
+            if word {
+                LogMessage('🗣 ' word)
+                lastHeardTime := A_TickCount
+            }
     }
 
     fullText := Trim(FileRead(commandFile))
-    if (fullText = "" || fullText = lastCommand)
+    if (fullText = '' || fullText = lastCommand)
         return
+
+    heardLine.Text := 'Heard: ' fullText          ; NEW live feedback
     lastCommand := fullText
     lastHeardTime := A_TickCount
-    WinSetTransparent(180, logGui.Hwnd)
-
-    lower := StrLower(fullText), feedback := ""
-    if RegExMatch(lower, "i)^computer\b") {
-        if (lower = lastAction) {
-            feedback := "⏸ Ignored duplicate"
-        }
-        else if RegExMatch(lower, "i)^(?:computer\s+)?exit\b") {
-            feedback := "✔ Exiting script"
-            LogMessage(feedback)
-            Sleep 500
-            ExitApp()
-        }
-        else if RegExMatch(lower, "i)notepad|note pad") {
-            Run "notepad.exe"
-            lastAction := lower
-            feedback := "✔ Opening Notepad"
-        }
-        else if InStr(lower, "calculator") {
-            Run "calc.exe"
-            lastAction := lower
-            feedback := "✔ Opening Calculator"
-        }
-        else if InStr(lower, "browser") {
-            Run "https://www.google.com"
-            lastAction := lower
-            feedback := "✔ Opening Browser"
-        }
-        else {
-            feedback := "⚠ Unknown command"
-        }
-    } else {
-        feedback := "(No trigger word)"
-    }
-    if feedback
-        LogMessage(feedback)
+    ProcessVoiceCommand(fullText)
 }
 
-;────────────────────────────────────────────────────
-; Fade out after 5 s of silence
-;────────────────────────────────────────────────────
+ProcessVoiceCommand(text) {
+    global customCommands, lastAction
+    for cmd in customCommands {
+        if (StrLower(text) = cmd.trigger) {
+            if (text = lastAction)
+                return
+            lastAction := text
+            switch cmd.type {
+                case 'run':
+                    FreezeOverlay(500)
+                    Run cmd.data
+                    LogMessage('✔ Launched ' cmd.data)
+                case 'send':
+                    FreezeOverlay(300)
+                    Send cmd.data
+                    LogMessage('✔ Sent ' cmd.data)
+                case 'exit':
+                    FreezeOverlay(300)
+                    LogMessage('✔ Exiting')
+                    Sleep 200
+                    ExitApp
+                default:
+                    LogMessage('⚠ Unknown type: ' cmd.type)
+            }
+            return
+        }
+    }
+}
+
+UpdateGuiPosition() {
+    global logGui, winW, winH, freezeUntil
+    if (A_TickCount < freezeUntil)
+        return
+
+    MouseGetPos &mx,&my
+    monitorCount := MonitorGetCount(), monitor := MonitorGetPrimary()
+    Loop monitorCount {
+        MonitorGet(A_Index,&L,&T,&R,&B)
+        if (mx>=L && mx<R && my>=T && my<B) {
+            monitor := A_Index
+            break
+        }
+    }
+    MonitorGet(monitor,&L,&T,&R,&B)
+    newX := Max(L, Min(mx+20, R-winW))
+    newY := Max(T, Min(my+20, B-winH))
+
+    static lastX := -1, lastY := -1
+    if (newX != lastX || newY != lastY) {
+        DllCall('SetWindowPos','Ptr',logGui.Hwnd,'Ptr',-1
+            ,'Int',newX,'Int',newY,'Int',0,'Int',0,'UInt',0x1|0x10)
+        lastX := newX, lastY := newY
+    }
+}
+
 FadeOutLogGui() {
     global logGui, lastHeardTime
-    if (A_TickCount - lastHeardTime > 5000)
-        WinSetTransparent(40, logGui.Hwnd)
-    else
-        WinSetTransparent(180, logGui.Hwnd)
+    WinSetTransparent((A_TickCount - lastHeardTime > 5000) ? 40 : 180, logGui.Hwnd)
 }
 
-;────────────────────────────────────────────────────
-; Append a timestamped line and cap at 200 lines
-;────────────────────────────────────────────────────
 LogMessage(msg) {
     global logOutput
-    ts := SubStr(A_Now,9,2) ":" SubStr(A_Now,11,2) ":" SubStr(A_Now,13,2)
-    newLine := "[" ts "] " msg "`n"
-    logOutput.Value .= newLine
+    if !IsObject(logOutput)
+        return
+    ts := FormatTime(, 'HH:mm:ss')
+    line := '[' ts '] ' msg '`n'
+    logOutput.Value .= line
 
-    text := logOutput.Value
-    total := StrLen(text)
-    noNL := StrLen(StrReplace(text, "`n", ""))
-    lines := total - noNL
-    if (lines > 200) {
-        drop := lines - 200, pos := 0
-        Loop drop
-            pos := InStr(text, "`n", false, pos+1)
-        logOutput.Value := SubStr(text, pos+1)
-    }
-    PostMessage(0x115, 7, 0, logOutput.Hwnd)
+    while (StrSplit(logOutput.Value, '`n').Length > 200)
+        logOutput.Value := SubStr(logOutput.Value, InStr(logOutput.Value,'`n')+1)
+
+    PostMessage 0x115, 7, 0, logOutput.Hwnd   ; scroll to bottom
 }

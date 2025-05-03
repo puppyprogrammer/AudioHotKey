@@ -1,0 +1,14 @@
+# Format:
+#  trigger phrase | type | data
+#
+# type: “run”   → Run an EXE or open a URL
+#       “send”  → Send raw AHK keystrokes (e.g. {F1}{F2})
+#       “exit”  → Shut down both scripts
+#
+computer notepad   | run  | notepad.exe
+computer calculator| run  | calc.exe
+computer paint   | run  | mspaint.exe
+computer browser   | run  | https://www.google.com
+cast thunder       | send | {F1}
+cast heal          | send | {F2}
+terminate session | exit |

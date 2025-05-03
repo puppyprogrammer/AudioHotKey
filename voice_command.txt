@@ -1,1 +1,1 @@
-computer exit
+terminate session
