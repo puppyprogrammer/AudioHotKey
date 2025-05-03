@@ -2,6 +2,7 @@
 #Requires AutoHotkey v2.0
 #SingleInstance Force
 
+;── DPI awareness ──
 DllCall("SetThreadDpiAwarenessContext", "Ptr", -3)
 CoordMode "Mouse", "Screen"          ; always use screen coords
 
@@ -17,7 +18,7 @@ global lastHeardTime  := A_TickCount
 global fileStream, initedStream := false
 global winW := 200, winH := 60
 global logGui, logOutput := ''
-global heardLine                       ; NEW: single‑line debug display
+global heardLine                       ; single‑line debug display
 global pyPid := 0
 global freezeUntil := 0                ; overlay “freeze” timer (ms)
 
@@ -78,13 +79,13 @@ logGui := Gui('+AlwaysOnTop -Caption +ToolWindow +E0x80000')
 logGui.BackColor := 'Black'
 logGui.SetFont('s6 cLime', 'Consolas')
 
-heardLine := logGui.AddText(                                ; NEW
+heardLine := logGui.AddText(                 ; live “Heard:” line
     'x4 y2 w' winW-8 ' h10 BackgroundBlack cYellow'
   , 'Heard:')
 
 logOutput := logGui.AddEdit(
       'ReadOnly '
-    . 'x0 y12 w' winW ' h' winH-12 ' '                   ; shifted down
+    . 'x0 y12 w' winW ' h' winH-12 ' '
     . '-VScroll -Border -E0x200 '
     . 'BackgroundBlack cLime', '')
 
@@ -127,7 +128,7 @@ CheckForVoiceCommand() {
     if (fullText = '' || fullText = lastCommand)
         return
 
-    heardLine.Text := 'Heard: ' fullText          ; NEW live feedback
+    heardLine.Text := 'Heard: ' fullText
     lastCommand := fullText
     lastHeardTime := A_TickCount
     ProcessVoiceCommand(fullText)
@@ -152,7 +153,7 @@ ProcessVoiceCommand(text) {
                 case 'exit':
                     FreezeOverlay(300)
                     LogMessage('✔ Exiting')
-                    Sleep 200
+                    Sleep(200)          ; ← fixed parentheses
                     ExitApp
                 default:
                     LogMessage('⚠ Unknown type: ' cmd.type)
@@ -197,7 +198,7 @@ LogMessage(msg) {
     global logOutput
     if !IsObject(logOutput)
         return
-    ts := FormatTime(, 'HH:mm:ss')
+    ts := FormatTime("", "HH:mm:ss")
     line := '[' ts '] ' msg '`n'
     logOutput.Value .= line
 
