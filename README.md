@@ -1,7 +1,9 @@
 # AudioHotKey
 
 **Voice‑controlled hotkey automation for Windows**  
-Runs entirely offline using AutoHotkey v2 and the Vosk speech‑recognition engine. Speak commands like “computer, notepad” or “computer, browser” to launch apps or URLs hands‑free.
+Runs entirely offline using AutoHotkey v2 and the Vosk speech‑recognition engine. Speak commands like “computer, notepad” or “computer, browser” to launch apps or URLs hands‑free. 
+
+https://discord.gg/bpTGGTdk8M 
 
 ---
 
