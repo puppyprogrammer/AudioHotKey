@@ -4,10 +4,18 @@ from vosk import Model, KaldiRecognizer
 os.environ["VOSK_LOG_LEVEL"] = "0"
 
 # ── paths ──────────────────────────────────────────────
-base_dir    = os.path.dirname(os.path.abspath(__file__))
-model_path  = os.path.join(base_dir, "model")
-config_path = os.path.join(base_dir, "commands.txt")
-output_file = os.path.join(base_dir, "voice_command.txt")
+# 1) Where the frozen EXE lives (or "." when running .py)
+exec_dir  = os.path.dirname(os.path.abspath(getattr(sys, 'executable', __file__)))
+# 2) Where the code file lives (in _MEIxxxx when frozen)
+base_dir  = os.path.dirname(os.path.abspath(__file__))
+
+# Prefer files beside the EXE; fall back to the temp dir
+model_path  = os.path.join(base_dir, "model")          # model is bundled
+config_path = os.path.join(exec_dir,  "commands.txt")  # editable file
+if not os.path.isfile(config_path):
+    config_path = os.path.join(base_dir, "commands.txt")
+
+output_file = os.path.join(exec_dir, "voice_command.txt")
 
 # ── sanity checks ──────────────────────────────────────
 if not os.path.isdir(model_path):

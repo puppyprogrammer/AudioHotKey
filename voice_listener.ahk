@@ -8,7 +8,6 @@ CoordMode "Mouse", "Screen"          ; always use screen coords
 
 ;── Globals ──
 global listenerExe    := A_ScriptDir '\VoskListener.exe'
-global listenerPy     := A_ScriptDir '\VoskListener.py'
 global commandFile    := A_ScriptDir '\voice_command.txt'
 global configFile     := A_ScriptDir '\commands.txt'
 global customCommands := []
@@ -22,10 +21,31 @@ global heardLine                       ; single‑line debug display
 global pyPid := 0
 global freezeUntil := 0                ; overlay “freeze” timer (ms)
 
+;── Helpers ──
 FreezeOverlay(ms := 300) {
     global freezeUntil
     freezeUntil := A_TickCount + ms
 }
+
+ClearVoiceFile() {
+    global commandFile
+    try {
+        f := FileOpen(commandFile, "w")   ; open‑for‑write → truncate
+        f.Close()
+    } catch {                              ; lock held by listener?
+        Sleep 100                          ; brief wait, then one retry
+        try {
+            f := FileOpen(commandFile, "w")
+            f.Close()
+        } catch {
+            ; still locked – just skip; better than crashing
+        }
+    }
+}
+
+;── Ensure the voice‑file exists (empty or not) ──
+if !FileExist(commandFile)
+    FileAppend '', commandFile
 
 ;── Load commands.txt ──
 if !FileExist(configFile) {
@@ -49,10 +69,8 @@ for line in StrSplit(FileRead(configFile), '`n', '`r') {
 ;── Launch listener ──
 if FileExist(listenerExe) {
     Run listenerExe, , "Hide", &pyPid
-} else if FileExist(listenerPy) {
-    Run Format('"python.exe" "%s"', listenerPy), , "Hide", &pyPid
 } else {
-    MsgBox '❌ Neither VoskListener.exe nor VoskListener.py found.'
+    MsgBox '❌ VoskListener.exe not found:`n' listenerExe
     ExitApp
 }
 
@@ -79,15 +97,13 @@ logGui := Gui('+AlwaysOnTop -Caption +ToolWindow +E0x80000')
 logGui.BackColor := 'Black'
 logGui.SetFont('s6 cLime', 'Consolas')
 
-heardLine := logGui.AddText(                 ; live “Heard:” line
+heardLine := logGui.AddText(
     'x4 y2 w' winW-8 ' h10 BackgroundBlack cYellow'
   , 'Heard:')
 
 logOutput := logGui.AddEdit(
-      'ReadOnly '
-    . 'x0 y12 w' winW ' h' winH-12 ' '
-    . '-VScroll -Border -E0x200 '
-    . 'BackgroundBlack cLime', '')
+      'ReadOnly x0 y12 w' winW ' h' winH-12
+    . ' -VScroll -Border -E0x200 BackgroundBlack cLime', '')
 
 logGui.Show('x' startX ' y' startY ' w' winW ' h' winH ' NoActivate')
 WinSetTransparent(180, logGui.Hwnd)
@@ -100,7 +116,8 @@ SetTimer FadeOutLogGui,       1000
 
 cleanup(*) {
     if (pyPid)
-        ProcessClose(pyPid)
+        ProcessClose(pyPid)   ; close EXE
+    ClearVoiceFile()          ; then wipe file
     return 0
 }
 OnExit cleanup
@@ -108,7 +125,8 @@ return
 
 ;────────────────────────────────────────────────────
 CheckForVoiceCommand() {
-    global fileStream, initedStream, commandFile, lastCommand, lastHeardTime, heardLine
+    global fileStream, initedStream, commandFile
+    global lastCommand, lastHeardTime, heardLine
 
     if !initedStream && FileExist(commandFile) {
         fileStream := FileOpen(commandFile, 'r')
@@ -129,8 +147,8 @@ CheckForVoiceCommand() {
         return
 
     heardLine.Text := 'Heard: ' fullText
-    lastCommand := fullText
-    lastHeardTime := A_TickCount
+    lastCommand    := fullText
+    lastHeardTime  := A_TickCount
     ProcessVoiceCommand(fullText)
 }
 
@@ -153,7 +171,10 @@ ProcessVoiceCommand(text) {
                 case 'exit':
                     FreezeOverlay(300)
                     LogMessage('✔ Exiting')
-                    Sleep(200)          ; ← fixed parentheses
+                    if (pyPid)
+                        ProcessClose(pyPid)   ; close EXE first
+                    ClearVoiceFile()          ; now safe
+                    Sleep(200)
                     ExitApp
                 default:
                     LogMessage('⚠ Unknown type: ' cmd.type)
@@ -167,7 +188,6 @@ UpdateGuiPosition() {
     global logGui, winW, winH, freezeUntil
     if (A_TickCount < freezeUntil)
         return
-
     MouseGetPos &mx,&my
     monitorCount := MonitorGetCount(), monitor := MonitorGetPrimary()
     Loop monitorCount {
@@ -180,11 +200,10 @@ UpdateGuiPosition() {
     MonitorGet(monitor,&L,&T,&R,&B)
     newX := Max(L, Min(mx+20, R-winW))
     newY := Max(T, Min(my+20, B-winH))
-
     static lastX := -1, lastY := -1
     if (newX != lastX || newY != lastY) {
-        DllCall('SetWindowPos','Ptr',logGui.Hwnd,'Ptr',-1
-            ,'Int',newX,'Int',newY,'Int',0,'Int',0,'UInt',0x1|0x10)
+        DllCall('SetWindowPos','Ptr', logGui.Hwnd, 'Ptr', -1
+            , 'Int', newX, 'Int', newY, 'Int', 0, 'Int', 0, 'UInt', 0x1|0x10)
         lastX := newX, lastY := newY
     }
 }
@@ -198,12 +217,10 @@ LogMessage(msg) {
     global logOutput
     if !IsObject(logOutput)
         return
-    ts := FormatTime("", "HH:mm:ss")
+    ts   := FormatTime('', 'HH:mm:ss')
     line := '[' ts '] ' msg '`n'
     logOutput.Value .= line
-
     while (StrSplit(logOutput.Value, '`n').Length > 200)
         logOutput.Value := SubStr(logOutput.Value, InStr(logOutput.Value,'`n')+1)
-
     PostMessage 0x115, 7, 0, logOutput.Hwnd   ; scroll to bottom
 }

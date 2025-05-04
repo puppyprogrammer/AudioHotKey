@@ -1,1 +1,1 @@
-terminate session
+heal
